@@ -1,9 +1,38 @@
 <script>
-  // --- 1. ตั้งค่า Flatpickr ---
+  // --- ตั้งค่าวันที่ปัจจุบัน ---
+  const today = new Date();
+  const firstDayOfMonth = new Date(today.getFullYear(), today.getMonth(), 1);
+  const lastDayOfMonth = new Date(today.getFullYear(), today.getMonth() + 1, 0);
+
+  // --- 1. ตั้งค่า Flatpickr (ปฏิทิน) ---
   const fp = flatpickr("#datePicker", {
     locale: "th", dateFormat: "Y-m-d", altInput: true, altFormat: "d/m/Y",
-    defaultDate: new Date(), disableMobile: "true"
+    defaultDate: today, disableMobile: "true"
   });
+  
+  // Flatpickr สำหรับหน้าแก้ไข (Modal)
+  const fpEdit = flatpickr("#editDatePicker", {
+    locale: "th", dateFormat: "Y-m-d", altInput: true, altFormat: "d/m/Y",
+    disableMobile: "true"
+  });
+
+  // Flatpickr สำหรับตัวกรอง "เริ่ม" และ "ถึง" (ตั้งค่า Default: ต้นเดือน - สิ้นเดือน)
+  const fpStart = flatpickr("#startDate", {
+    locale: "th", dateFormat: "Y-m-d", altInput: true, altFormat: "d/m/Y",
+    defaultDate: firstDayOfMonth, disableMobile: "true"
+  });
+  
+  const fpEnd = flatpickr("#endDate", {
+    locale: "th", dateFormat: "Y-m-d", altInput: true, altFormat: "d/m/Y",
+    defaultDate: lastDayOfMonth, disableMobile: "true"
+  });
+
+  // --- เริ่มต้นโหลด URL ของ Sheet ---
+  window.onload = function() {
+    google.script.run.withSuccessHandler(function(url) {
+      document.getElementById('sheetLink').href = url;
+    }).getSheetUrl();
+  };
 
   // --- 2. ฟังก์ชันสลับหน้า ---
   function switchPage(pageId, navElement) {
@@ -18,10 +47,10 @@
     }
   }
 
-  // --- 3. ฟังก์ชันบันทึกข้อมูล ---
+  // --- 3. ฟังก์ชันบันทึกข้อมูล (เพิ่ม) ---
   function handleFormSubmit(formObject) {
     event.preventDefault();
-    const btn = document.querySelector('.btn-save');
+    const btn = document.querySelector('#myForm .btn-save');
     const originalText = btn.innerText;
     btn.innerText = 'กำลังบันทึก... ⏳'; btn.disabled = true;
 
@@ -29,6 +58,7 @@
         const msg = document.getElementById('message');
         msg.innerText = response; msg.style.display = 'block';
         formObject.reset(); fp.setDate(new Date());
+        document.getElementById('expense').checked = true; // คืนค่า default
         btn.innerText = originalText; btn.disabled = false;
         setTimeout(() => { msg.style.display = 'none'; }, 3000);
       }).saveData(formObject);
@@ -36,13 +66,41 @@
 
   // --- 4. ฟังก์ชันโหลดและคำนวณ Dashboard ---
   let myChart = null;
+  let allDataCache = []; // เก็บข้อมูลทั้งหมดไว้ในตัวแปร เพื่อไม่ต้องโหลดใหม่ตลอดเวลา
 
   function loadDashboard() {
     document.getElementById('recentList').innerHTML = '<li class="list-group-item text-center">กำลังโหลด...</li>';
-    google.script.run.withSuccessHandler(renderDashboard).getDataForDashboard();
+    google.script.run.withSuccessHandler(processData).getDataForDashboard();
   }
 
-  function renderDashboard(data) {
+  // ฟังก์ชันแปลงวันที่ไทย (dd/mm/yyyy + 543) เป็น JS Date Object
+  function parseThaiDate(dateString) {
+      if(!dateString) return null;
+      let parts = dateString.split('/');
+      if(parts.length !== 3) return null;
+      let d = parseInt(parts[0]);
+      let m = parseInt(parts[1]) - 1; // เดือน JS เริ่มที่ 0
+      let y = parseInt(parts[2]) - 543; // แปลงกลับเป็น ค.ศ.
+      return new Date(y, m, d);
+  }
+
+  function processData(data) {
+    allDataCache = data; // เก็บข้อมูลดิบไว้
+    renderDashboard();
+  }
+
+  function renderDashboard() {
+    const data = allDataCache;
+    
+    // ดึงค่าวันที่จากตัวกรอง
+    const startVal = document.getElementById('startDate').value; // yyyy-mm-dd
+    const endVal = document.getElementById('endDate').value;     // yyyy-mm-dd
+    
+    const startDate = startVal ? new Date(startVal) : new Date(0); // ถ้าไม่เลือก เอาตั้งแต่เริ่ม
+    const endDate = endVal ? new Date(endVal) : new Date(9999, 11, 31); // ถ้าไม่เลือก เอาถึงอนาคต
+    // ปรับเวลา End Date ให้เป็น 23:59:59
+    endDate.setHours(23, 59, 59, 999);
+
     if (!data || data.length === 0) {
        document.getElementById('recentList').innerHTML = '<li class="list-group-item text-center text-muted">ยังไม่มีข้อมูลรายการ</li>';
        return;
@@ -52,51 +110,64 @@
     let expense = 0;
     let categories = {};
     let recentHtml = '';
-    const limit = 5; 
-    let count = 0;
-
+    
+    // วนลูปย้อนหลัง (ล่าสุดขึ้นก่อน)
     for (let i = data.length - 1; i >= 0; i--) {
         let row = data[i];
-        if (!row[0] || row[4] === "") continue;
+        if (!row[0]) continue; // ข้ามแถวว่าง
+
+        // เช็คช่วงวันที่
+        let rowDate = parseThaiDate(row[0]);
+        if (rowDate < startDate || rowDate > endDate) continue;
 
         let type = row[1];
         let cat = row[2];
+        let detail = row[3];
         let amount = parseFloat(String(row[4]).replace(/,/g, ''));
         if (isNaN(amount)) amount = 0;
 
+        // คำนวณยอดรวม
         if (type === 'รายรับ') {
             income += amount;
-            // รวมยอดรายรับเข้ากราฟด้วย
-            if (categories[cat]) { categories[cat] += amount; } 
-            else { categories[cat] = amount; }
+            if (categories[cat]) { categories[cat] += amount; } else { categories[cat] = amount; }
         } else if (type === 'รายจ่าย') {
             expense += amount;
-            if (categories[cat]) { categories[cat] += amount; } 
-            else { categories[cat] = amount; }
+            if (categories[cat]) { categories[cat] += amount; } else { categories[cat] = amount; }
         }
 
-        if (count < limit) {
-            let colorClass = type === 'รายรับ' ? 'text-success' : 'text-danger';
-            let sign = type === 'รายรับ' ? '+' : '-';
-            // ปรับสี Text ให้เข้มขึ้น
-            let amountColor = type === 'รายรับ' ? '#4ECDC4' : '#FF6B6B';
-            
-            recentHtml += `<li class="list-group-item d-flex justify-content-between align-items-center">
-              <div>
-                <span class="badge bg-light text-dark border">${row[0]}</span> 
-                <span class="ms-1" style="font-weight:500;">${cat}</span>
-                <div class="text-muted" style="font-size:0.8rem; margin-left: 5px;">${row[3]}</div>
+        // สร้างรายการ HTML (แสดงทั้งหมดที่อยู่ในช่วงวันที่ ไม่จำกัดแค่ 5)
+        let colorClass = type === 'รายรับ' ? '#4ECDC4' : '#FF6B6B';
+        let sign = type === 'รายรับ' ? '+' : '-';
+        
+        // ข้อมูลสำหรับส่งไปฟังก์ชัน Edit (row index, date, type, cat, detail, amount)
+        // row[0] คือวันที่แบบไทย ต้องแปลงกลับเป็น yyyy-mm-dd สำหรับใส่ใน input date
+        let editDate = rowDate.toISOString().split('T')[0];
+        
+        recentHtml += `
+            <li class="list-group-item d-flex justify-content-between align-items-center">
+              <div class="d-flex align-items-center" style="width: 60%;">
+                <div class="me-2">
+                  <span class="badge bg-light text-dark border">${row[0]}</span>
+                </div>
+                <div style="line-height: 1.2;">
+                   <div style="font-weight:500;">${cat}</div>
+                   <div class="text-muted text-truncate" style="font-size:0.8rem;">${detail}</div>
+                </div>
               </div>
-              <span style="color:${amountColor}; font-weight:700;">${sign}${amount.toLocaleString()}</span>
+              <div class="text-end">
+                <div style="color:${colorClass}; font-weight:700;">${sign}${amount.toLocaleString()}</div>
+                <button class="btn btn-sm btn-outline-secondary py-0 px-2 mt-1" style="font-size: 0.7rem; border-radius: 10px;" 
+                   onclick="openEditModal(${i}, '${editDate}', '${type}', '${cat}', '${detail}', ${amount})">
+                   <i class="bi bi-pencil"></i> แก้ไข
+                </button>
+              </div>
             </li>`;
-            count++;
-        }
     }
 
     document.getElementById('totalIncome').innerText = income.toLocaleString();
     document.getElementById('totalExpense').innerText = expense.toLocaleString();
     document.getElementById('totalBalance').innerText = (income - expense).toLocaleString();
-    document.getElementById('recentList').innerHTML = recentHtml || '<li class="list-group-item text-center">ยังไม่มีข้อมูล</li>';
+    document.getElementById('recentList').innerHTML = recentHtml || '<li class="list-group-item text-center">ไม่พบข้อมูลในช่วงวันที่เลือก</li>';
 
     if (income > 0 || expense > 0) {
         renderChart(categories);
@@ -110,18 +181,8 @@
     const labels = Object.keys(categories);
     const values = Object.values(categories);
     
-    // --- ตั้งค่าสี Vibrant Pastel (เข้มขึ้น สดขึ้น) ---
-    const colorMap = {
-      'รายได้': '#4ECDC4' // สีเขียวมิ้นต์เข้ม
-    };
-    
-    // ชุดสีสำรองที่สดใสขึ้น (แดง, ม่วง, เหลือง, ส้ม)
-    const fallbackColors = ['#FF6B6B', '#A18CD1', '#FFD93D', '#FF8E72', '#6BCB77', '#4D96FF'];
-
-    let finalColors = labels.map((labelName, index) => {
-       if (colorMap[labelName]) return colorMap[labelName];
-       return fallbackColors[index % fallbackColors.length];
-    });
+    const fallbackColors = ['#FF6B6B', '#4ECDC4', '#A18CD1', '#FFD93D', '#FF8E72', '#6BCB77', '#4D96FF'];
+    let finalColors = labels.map((label, index) => fallbackColors[index % fallbackColors.length]);
 
     if (myChart) { myChart.destroy(); }
 
@@ -132,35 +193,56 @@
             datasets: [{
                 data: values,
                 backgroundColor: finalColors,
-                borderWidth: 3,
-                borderColor: '#ffffff',
-                hoverOffset: 15 // เวลาเอาเมาส์ชี้ ชิ้นกราฟจะเด้งออกมาเยอะๆ
+                borderWidth: 2,
+                borderColor: '#ffffff'
             }]
         },
         options: {
             responsive: true,
             maintainAspectRatio: false,
-            animation: {
-                animateScale: true, // กราฟเด้งขึ้นมาตอนโหลด
-                animateRotate: true
-            },
             plugins: {
-                legend: { position: 'right', labels: { font: { family: 'Kanit', size: 12 }, boxWidth: 15 } },
-                tooltip: {
-                  backgroundColor: 'rgba(0,0,0,0.8)',
-                  padding: 12,
-                  bodyFont: { family: 'Kanit' },
-                  callbacks: {
-                    label: function(context) {
-                       let label = context.label || '';
-                       if (label) { label += ': '; }
-                       label += context.parsed.toLocaleString() + ' บาท';
-                       return label;
-                    }
-                  }
-                }
+                legend: { position: 'right', labels: { font: { family: 'Kanit' }, boxWidth: 12 } }
             }
         }
     });
+  }
+
+  // --- 5. ฟังก์ชันจัดการการแก้ไข (Edit Logic) ---
+  
+  // เปิด Modal และใส่ค่าเดิมลงไป
+  function openEditModal(index, dateIso, type, category, detail, amount) {
+     document.getElementById('editRowIndex').value = index;
+     fpEdit.setDate(dateIso);
+     
+     if(type === 'รายรับ') document.getElementById('editIncome').checked = true;
+     else document.getElementById('editExpense').checked = true;
+     
+     document.getElementById('editCategory').value = category;
+     document.getElementById('editDetail').value = detail;
+     document.getElementById('editAmount').value = amount;
+     
+     var editModal = new bootstrap.Modal(document.getElementById('editModal'));
+     editModal.show();
+  }
+
+  // ส่งข้อมูลแก้ไขไปบันทึก
+  function handleEditSubmit(formObject) {
+    event.preventDefault();
+    const btn = document.querySelector('#editForm .btn-save');
+    const originalText = btn.innerText;
+    btn.innerText = 'กำลังบันทึก...'; btn.disabled = true;
+
+    google.script.run.withSuccessHandler(function(response) {
+       // ปิด Modal
+       var modalEl = document.getElementById('editModal');
+       var modal = bootstrap.Modal.getInstance(modalEl);
+       modal.hide();
+
+       // รีเฟรชข้อมูลใหม่ทันที
+       alert(response);
+       loadDashboard(); 
+
+       btn.innerText = originalText; btn.disabled = false;
+    }).editData(formObject);
   }
 </script>
